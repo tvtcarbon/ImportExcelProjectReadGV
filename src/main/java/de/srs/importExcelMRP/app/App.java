@@ -1,9 +1,10 @@
 package de.srs.importExcelMRP.app;
 
-import java.io.File;
-import java.io.FileInputStream;
-import java.io.IOException;
+import java.io.*;
+import java.net.URI;
 import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.nio.file.attribute.FileTime;
 import java.sql.Connection;
 import java.sql.DriverManager;
@@ -42,10 +43,12 @@ public class App {
 	protected static final  Logger logger = LogManager.getLogger(App.class);
 
 	static String folderExcelFiles = "";
+	static String dbConnection;
+
 	//final static String fileName = "MRP25-TgAl-a-Arbdatei.xlsx";
 	static String fileName = "";
-	final static String SHEET_NAME = "Rezepte";
-	final static int rowStart = 1;
+	final static String SHEET_NAME = "MOPS";
+	static int rowStart;
 	static int rowNumber = 0;
 
 	private static final String END_OF_GIESS = "Einsatz GO o. Kr.Pprod";
@@ -72,60 +75,57 @@ public class App {
 
 	public static void main(String[] args) throws Exception {
 
-			readFileProperties();
-			readLastFileFronDisk();
-			initialize();
+			try{
+			 readFileProperties();
+			 readLastFileFromDisk();
+			 initialize();
 
-			readKtr();
+			 readKtr();
 
-			try {
-				instanceConn.close();
-			} catch (SQLException e) {
-                logger.error("Error:: {}", String.valueOf(e));
 			}
-			
+			catch(Exception e){
+				System.out.println(e);
+				Runtime rt = Runtime.getRuntime();
+				Process proc = rt.exec("xcopy mails\\MailErrorGV.tml \\\\10.68.254.18\\Fidavid\\HeaderOut /s /i /y /q");
+
+			}
+			finally {
+				try {
+					instanceConn.close();
+					workbook.close();
+				} catch (IOException e) {
+					logger.error("Error:: {}", String.valueOf(e));
+				}
+			}
 
 	}
 
 	public static void readFileProperties() throws IOException {
-		
-
-		String rootPath;
-        rootPath = Objects.requireNonNull(Thread.currentThread().getContextClassLoader().getResource("")).getPath();
-        String appConfigPath = rootPath + "app.properties";
-        logger.debug("appConfigPath:: {}", appConfigPath);
-
 		Properties appProps = new Properties();
-		appProps.load(new FileInputStream(appConfigPath));
+		String rootPath;
+		InputStream in = null;
+
+		String relativePath = "app.properties";
+		try (FileInputStream fis = new FileInputStream(relativePath)) {
+			appProps.load(fis);
+		} catch (IOException e) {
+			logger.error("Error:: {}", String.valueOf(e));
+		}
 
 
-		String pathExcelFiles = appProps.getProperty("pathExcelFiles");
+		String pathExcelFiles = appProps.getProperty("gv.pathExcelFiles");
+		dbConnection = appProps.getProperty("gv.database");
+		rowStart = Integer.parseInt(appProps.getProperty("gv.excel.row.start"));
+
 		folderExcelFiles = pathExcelFiles;
         logger.debug("pathExcelFiles:: {}", pathExcelFiles);
 	}
 
-	public static void readLastFileFronDisk() {
-		TreeMap<Long, String> files = new TreeMap<>();
-
-		final File folder = new File(folderExcelFiles);
-	    for (final File fileEntry : Objects.requireNonNull(folder.listFiles())) {
-	        if (fileEntry.isDirectory()) {
-	        	readLastFileFronDisk();
-	        } else {
-	        	try {
-	        		
-	        	    FileTime creationTime = (FileTime) Files.getAttribute(fileEntry.getAbsoluteFile().toPath(), "creationTime");
-	        	    //logger.info("File::"+ fileEntry.getName() + " "+ creationTime.toString() + " Ms::" + creationTime.toMillis());
-	        	    files.put(creationTime.toMillis(), fileEntry.getName());
-	        	    
-	        	} catch (IOException ex) {
-	        	    // handle exception
-	        	}
-	        }
-	    }
-        logger.info("The last file is:: {}", files.get(files.lastKey()));
-	    //logger.info(files.keySet().toString());
-	    fileName = files.get(files.lastKey());
+	public static void readLastFileFromDisk() {
+		/**
+		 * GV has a fix fileName: "Blending.xlsx";
+		 */
+		fileName = "Blending.xlsx";
 	}
 
     /**
@@ -138,7 +138,7 @@ public class App {
      * - IOException: If an error occurs while accessing the Excel file.
      */
 	private static void initialize() {
-		logger.info("Test Read File Excel");
+		logger.info("Read File Excel");
 
 		projectpath = System.getProperty("user.dir");
 		logger.debug(projectpath);
@@ -153,8 +153,8 @@ public class App {
 		}
 	}
 
-	protected static void readKtr() throws ErrorReadExcelException {
-		rowNumber = rowStart;
+	protected static void readKtr() throws ErrorReadExcelException, DatabaseException {
+		rowNumber = rowStart-2;
 		mrpObj = new MrpObj();
 		emptyRow = 0;
 
@@ -174,7 +174,7 @@ public class App {
                             sheet.getRow(rowNumber).getCell(ExcelEnum.KTRNR.getNr()).getCellType().equals(CellType.FORMULA) ? String.valueOf((int) sheet.getRow(rowNumber).getCell(ExcelEnum.KTRNR.getNr()).getNumericCellValue()) : sheet.getRow(rowNumber).getCell(ExcelEnum.KTRNR.getNr()).getStringCellValue());
 					mrpObj.setKosTr_Bez(sheet.getRow(rowNumber).getCell(ExcelEnum.KTRBEZEICHUNG.getNr()).getStringCellValue().length() > 50
 							? sheet.getRow(rowNumber).getCell(ExcelEnum.KTRBEZEICHUNG.getNr()).getStringCellValue().substring(0, 49)
-							: sheet.getRow(rowNumber).getCell(1).getStringCellValue());
+							: sheet.getRow(rowNumber).getCell(ExcelEnum.KTRBEZEICHUNG.getNr()).getStringCellValue());
 					mrpObj.setKostr_Grp(sheet.getRow(rowNumber).getCell(ExcelEnum.KTRGRP.getNr()).getStringCellValue());
 					mrpObj.setFrmt(sheet.getRow(rowNumber).getCell(ExcelEnum.FORMAT.getNr()).getStringCellValue() != null
 							? sheet.getRow(rowNumber).getCell(ExcelEnum.FORMAT.getNr()).getStringCellValue()
@@ -197,7 +197,13 @@ public class App {
 			}
 
 		}
+		try {
+			saveMatNrPreise();
+		} catch (DatabaseException e) {
+			logger.error("saveMatNrPreise error:: {}", String.valueOf(e));
+			throw new DatabaseException("Save Error:: "+ e, e.getMessage());
 
+		}
 		logger.info(mrpObj.toString());
 		logger.info("end");
 
@@ -231,11 +237,11 @@ public class App {
 				}
 				else {
                     //toDo bessere kontrolle
-					if ( (sheet.getRow(rowNumber).getCell(ExcelEnum.ZEILEEP.getNr()) != null) && (sheet.getRow(rowNumber).getCell(ExcelEnum.ZEILEEP.getNr()).getStringCellValue().equalsIgnoreCase(E))) {
+					if ( (sheet.getRow(rowNumber).getCell(ExcelEnum.EINSATZ.getNr()) != null) && (sheet.getRow(rowNumber).getCell(ExcelEnum.EINSATZ.getNr()).getStringCellValue().equalsIgnoreCase(E))) {
 						//Giess oder Imco Ofen ?
 						if (sheet.getRow(rowNumber).getCell(ExcelEnum.EINSATZMATERIAL.getNr()).getStringCellValue().equals(END_OF_GIESS) || (sheet.getRow(rowNumber).getCell(ExcelEnum.EINSATZMATERIAL.getNr()) != null
                                 && !String.valueOf(sheet.getRow(rowNumber).getCell(ExcelEnum.EINSATZMATERIAL.getNr()).getStringCellValue()).isEmpty() &&
-                                sheet.getRow(rowNumber).getCell(ExcelEnum.ME_S_NOT_USED.getNr()) != null && sheet.getRow(rowNumber).getCell(ExcelEnum.ME_S_NOT_USED.getNr()).getStringCellValue().equalsIgnoreCase("t") ) ) {
+                                sheet.getRow(rowNumber).getCell(ExcelEnum.ME_X_NOT_USED.getNr()) != null && sheet.getRow(rowNumber).getCell(ExcelEnum.ME_X_NOT_USED.getNr()).getStringCellValue().equalsIgnoreCase("t") ) ) {
 
                             imcoMonat1.put(imcoMonat1.size()+1, readRezAnteilImcoMonat1(mrpObj));
 							imcoMonat2.put(imcoMonat2.size()+1, readRezAnteilImcoMonat2(mrpObj));
@@ -260,7 +266,7 @@ public class App {
     private static String getMatNr() {
         String matNr = "";
         if (sheet.getRow(rowNumber).getCell(ExcelEnum.MATNR.getNr()) != null) {
-            if (sheet.getRow(rowNumber).getCell(4).getCellType().equals(CellType.NUMERIC) || sheet.getRow(rowNumber).getCell(4).getCellType().equals(CellType.FORMULA))
+            if (sheet.getRow(rowNumber).getCell(ExcelEnum.MATNR.getNr()).getCellType().equals(CellType.NUMERIC) || sheet.getRow(rowNumber).getCell(ExcelEnum.MATNR.getNr()).getCellType().equals(CellType.FORMULA))
                 matNr =String.valueOf((int) sheet.getRow(rowNumber).getCell(ExcelEnum.MATNR.getNr()).getNumericCellValue());
             else
                 matNr = sheet.getRow(rowNumber).getCell(ExcelEnum.MATNR.getNr() ).getStringCellValue();
@@ -289,12 +295,13 @@ sheet.getRow(rowNumber).getCell(7) != null && sheet.getRow(rowNumber).getCell(Ex
 	 */
 	protected static MrpRezObjExt readRezAnteilGiessMonat1(MrpObj mrpObj) throws ErrorReadExcelException {
 		MrpRezObjExt rpRezObjExt = new MrpRezObjExt();
+		String ofenTyp;
 
         try {
 			// _nr
 			rpRezObjExt.setKosTr(mrpObj.getKosTr());
 			// Mat-nr "E"
-			if (sheet.getRow(rowNumber).getCell(4).getCellType().equals(CellType.NUMERIC) || sheet.getRow(rowNumber).getCell(ExcelEnum.MATNR.getNr()).getCellType().equals(CellType.FORMULA))
+			if (sheet.getRow(rowNumber).getCell(ExcelEnum.MATNR.getNr()).getCellType().equals(CellType.NUMERIC) || sheet.getRow(rowNumber).getCell(ExcelEnum.MATNR.getNr()).getCellType().equals(CellType.FORMULA))
 				rpRezObjExt.setMatNr(String.valueOf((int) sheet.getRow(rowNumber).getCell(ExcelEnum.MATNR.getNr()).getNumericCellValue()));
 			else
 				rpRezObjExt.setMatNr(sheet.getRow(rowNumber).getCell(ExcelEnum.MATNR.getNr()).getStringCellValue());
@@ -305,10 +312,9 @@ sheet.getRow(rowNumber).getCell(7) != null && sheet.getRow(rowNumber).getCell(Ex
 			rpRezObjExt.setEinsatzMaterial(sheet.getRow(rowNumber).getCell(ExcelEnum.EINSATZMATERIAL.getNr()).getStringCellValue());
 			// AB "I" = 8
 			rpRezObjExt.setAusbeute((float) sheet.getRow(rowNumber).getCell(ExcelEnum.AB.getNr()).getNumericCellValue());
-			// Rezant-1 "J" = 9
-			rpRezObjExt.setRezeptanteil((float) sheet.getRow(rowNumber).getCell(ExcelEnum.REZEPT1.getNr()).getNumericCellValue());
+			rpRezObjExt.setRezeptanteil((float) sheet.getRow(rowNumber).getCell(ExcelEnum.REZEPT_ANTEIL_GIESS_M1.getNr()).getNumericCellValue());
 			// MI-1 "L" = 11
-			rpRezObjExt.setMi(sheet.getRow(rowNumber).getCell(11) != null ? (float) sheet.getRow(rowNumber).getCell(ExcelEnum.MI1.getNr()).getNumericCellValue() : 0);
+			rpRezObjExt.setMi(sheet.getRow(rowNumber).getCell(ExcelEnum.MI1.getNr()) != null ? (float) sheet.getRow(rowNumber).getCell(ExcelEnum.MI1.getNr()).getNumericCellValue() : 0);
 			// Moto-1 "N" = 13
 			rpRezObjExt.setMoto1_2(sheet.getRow(rowNumber).getCell(ExcelEnum.Moto1.getNr()) != null
 					? (float) sheet.getRow(rowNumber).getCell(ExcelEnum.Moto1.getNr()).getNumericCellValue()
@@ -320,9 +326,17 @@ sheet.getRow(rowNumber).getCell(7) != null && sheet.getRow(rowNumber).getCell(Ex
 			// MatKosten_rezeptindividuell-1 "V" = 21
 			rpRezObjExt.setMatKosten(sheet.getRow(rowNumber).getCell(ExcelEnum.METKOSTEN1.getNr()) != null ? (float) sheet.getRow(rowNumber).getCell(ExcelEnum.METKOSTEN1.getNr()).getNumericCellValue() :0);
             //OfenTyp
-            rpRezObjExt.setOfenTyp(sheet.getRow(rowNumber).getCell(ExcelEnum.OFENTYP.getNr()).getStringCellValue());
+			//rpRezObjExt.setOfenTyp(sheet.getRow(rowNumber).getCell(ExcelEnum.OFENTYP.getNr()) == null ? "T" : sheet.getRow(rowNumber).getCell(ExcelEnum.OFENTYP.getNr()).getStringCellValue());
+			if (sheet.getRow(rowNumber).getCell(ExcelEnum.OFENTYP.getNr()) == null || (sheet.getRow(rowNumber).getCell(ExcelEnum.OFENTYP.getNr()) != null && sheet.getRow(rowNumber).getCell(ExcelEnum.OFENTYP.getNr()).getStringCellValue().isEmpty()))
+				ofenTyp = "T";
+			else
+				ofenTyp = sheet.getRow(rowNumber).getCell(ExcelEnum.OFENTYP.getNr()).getStringCellValue();
+
+			rpRezObjExt.setOfenTyp(ofenTyp);
+
+
             //Gatt. Grp.
-            rpRezObjExt.setGattGrp(sheet.getRow(rowNumber).getCell(ExcelEnum.ARTGATTGRP.getNr()).getStringCellValue());
+            rpRezObjExt.setGattGrp(sheet.getRow(rowNumber).getCell(ExcelEnum.GATTGRP.getNr()).getStringCellValue());
 
             logger.info("RowNumber:: {} - Monat 1 -{}", rowNumber + 1, rpRezObjExt.toString());
 			
@@ -340,6 +354,7 @@ sheet.getRow(rowNumber).getCell(7) != null && sheet.getRow(rowNumber).getCell(Ex
 	protected static MrpRezObjExt readRezAnteilGiessMonat2(MrpObj mrpObj) throws ErrorReadExcelException {
 
 		MrpRezObjExt rpRezObjExt = new MrpRezObjExt();
+		String ofenTyp;
 
 		try {
 			// _nr
@@ -356,7 +371,7 @@ sheet.getRow(rowNumber).getCell(7) != null && sheet.getRow(rowNumber).getCell(Ex
 			// AB "I" = 8
 			rpRezObjExt.setAusbeute((float) sheet.getRow(rowNumber).getCell(ExcelEnum.AB.getNr()).getNumericCellValue());
 			// Rezant-2 "AC" = 29
-			rpRezObjExt.setRezeptanteil((float) sheet.getRow(rowNumber).getCell(ExcelEnum.REZEPT2.getNr()).getNumericCellValue());
+			rpRezObjExt.setRezeptanteil((float) sheet.getRow(rowNumber).getCell(ExcelEnum.REZEPT_ANTEIL_GIESS_M2.getNr()).getNumericCellValue());
 			// MI-2 "AE" = 31
 			rpRezObjExt.setMi((float) sheet.getRow(rowNumber).getCell(ExcelEnum.MI2.getNr()).getNumericCellValue());
 			// Moto-2 "AG" = 33
@@ -370,9 +385,17 @@ sheet.getRow(rowNumber).getCell(7) != null && sheet.getRow(rowNumber).getCell(Ex
 			// MatKosten_rezeptindividuell-2 "A" = 41
 			rpRezObjExt.setMatKosten(sheet.getRow(rowNumber).getCell(ExcelEnum.METKOSTEN2.getNr()) != null ? (float) sheet.getRow(rowNumber).getCell(ExcelEnum.METKOSTEN2.getNr()).getNumericCellValue() : 0);
             //OfenTyp
-            rpRezObjExt.setOfenTyp(sheet.getRow(rowNumber).getCell(ExcelEnum.OFENTYP.getNr()).getStringCellValue());
-            //Gatt. Grp.
-            rpRezObjExt.setGattGrp(sheet.getRow(rowNumber).getCell(ExcelEnum.ARTGATTGRP.getNr()).getStringCellValue());
+			//rpRezObjExt.setOfenTyp(sheet.getRow(rowNumber).getCell(ExcelEnum.OFENTYP.getNr()) == null ? "T" : sheet.getRow(rowNumber).getCell(ExcelEnum.OFENTYP.getNr()).getStringCellValue());
+			if (sheet.getRow(rowNumber).getCell(ExcelEnum.OFENTYP.getNr()) == null || (sheet.getRow(rowNumber).getCell(ExcelEnum.OFENTYP.getNr()) != null && sheet.getRow(rowNumber).getCell(ExcelEnum.OFENTYP.getNr()).getStringCellValue().isEmpty()))
+				ofenTyp = "T";
+			else
+				ofenTyp = sheet.getRow(rowNumber).getCell(ExcelEnum.OFENTYP.getNr()).getStringCellValue();
+
+			rpRezObjExt.setOfenTyp(ofenTyp);
+
+
+			//Gatt. Grp.
+            rpRezObjExt.setGattGrp(sheet.getRow(rowNumber).getCell(ExcelEnum.GATTGRP.getNr()).getStringCellValue());
 
             logger.info("RowNumber:: {} - Monat 2 -{}", rowNumber + 1, rpRezObjExt.toString());
 			
@@ -391,12 +414,13 @@ sheet.getRow(rowNumber).getCell(7) != null && sheet.getRow(rowNumber).getCell(Ex
 	protected static MrpRezObjExt readRezAnteilImcoMonat1(MrpObj mrpObj) throws ErrorReadExcelException {
 		MrpRezObjExt rpRezObjExt = new MrpRezObjExt();
 		try {
-			//Art.Art Excel Datei Spalte F (6) und Einsatzmaterial G (7) not empty
-			if (sheet.getRow(rowNumber).getCell(5) != null && !sheet.getRow(rowNumber).getCell(5).getStringCellValue().isEmpty() && sheet.getRow(rowNumber).getCell(7) != null && !sheet.getRow(rowNumber).getCell(7).getStringCellValue().isEmpty()) {
+			//Art.Art Einsatzmaterial not empty
+			if (sheet.getRow(rowNumber).getCell(ExcelEnum.ARTART.getNr()) != null && !sheet.getRow(rowNumber).getCell(ExcelEnum.ARTART.getNr()).getStringCellValue().isEmpty() &&
+					sheet.getRow(rowNumber).getCell(ExcelEnum.EINSATZMATERIAL.getNr()) != null && !sheet.getRow(rowNumber).getCell(ExcelEnum.EINSATZMATERIAL.getNr()).getStringCellValue().isEmpty()) {
 				// _nr
                 setMrpObjCommon(mrpObj, rpRezObjExt);
                 // ME-1 "J" = 10
-				rpRezObjExt.setRezeptanteil((float) sheet.getRow(rowNumber).getCell(ExcelEnum.REZEPT1.getNr()).getNumericCellValue());
+				rpRezObjExt.setRezeptanteil((float) sheet.getRow(rowNumber).getCell(ExcelEnum.REZEPT_ANTEIL_IMCO_M1.getNr()).getNumericCellValue());
 		        // MI-1 "K" = 11
 				rpRezObjExt.setMi((float) sheet.getRow(rowNumber).getCell(ExcelEnum.MI1.getNr()).getNumericCellValue());
 		        // Moto-1 "M" = 13
@@ -428,19 +452,26 @@ sheet.getRow(rowNumber).getCell(7) != null && sheet.getRow(rowNumber).getCell(Ex
      * @param rpRezObjExt The object where the properties will be set.
      */
     private static void setMrpObjCommon(MrpObj mrpObj, MrpRezObjExt rpRezObjExt) {
+		String ofenTyp;
         rpRezObjExt.setKosTr(mrpObj.getKosTr());
         // Mat-nr =  5
         rpRezObjExt.setMatNr(String.valueOf((int) sheet.getRow(rowNumber).getCell(ExcelEnum.MATNR.getNr()).getNumericCellValue()));
         // Art-Art "F" = 6
-        rpRezObjExt.setMatGrp(sheet.getRow(rowNumber).getCell(ExcelEnum.ARTGATTGRP.getNr()).getStringCellValue());
+        rpRezObjExt.setMatGrp(sheet.getRow(rowNumber).getCell(ExcelEnum.ARTART.getNr()).getStringCellValue());
         // EMat "G" = 7
         rpRezObjExt.setEinsatzMaterial(sheet.getRow(rowNumber).getCell(ExcelEnum.EINSATZMATERIAL.getNr()).getStringCellValue());
         // AB "I" = 8
         rpRezObjExt.setAusbeute((float) sheet.getRow(rowNumber).getCell(ExcelEnum.AB.getNr()).getNumericCellValue());
         //OfenTyp
-        rpRezObjExt.setOfenTyp(sheet.getRow(rowNumber).getCell(ExcelEnum.OFENTYP.getNr()).getStringCellValue());
+		//rpRezObjExt.setOfenTyp(sheet.getRow(rowNumber).getCell(ExcelEnum.OFENTYP.getNr()) == null  ?  "T" : sheet.getRow(rowNumber).getCell(ExcelEnum.OFENTYP.getNr()).getStringCellValue());
+		if (sheet.getRow(rowNumber).getCell(ExcelEnum.OFENTYP.getNr()) == null || (sheet.getRow(rowNumber).getCell(ExcelEnum.OFENTYP.getNr()) != null && sheet.getRow(rowNumber).getCell(ExcelEnum.OFENTYP.getNr()).getStringCellValue().isEmpty()))
+			ofenTyp = "T";
+		else
+			ofenTyp = sheet.getRow(rowNumber).getCell(ExcelEnum.OFENTYP.getNr()).getStringCellValue();
+
+		rpRezObjExt.setOfenTyp(ofenTyp);
         //Gatt. Grp.
-        rpRezObjExt.setGattGrp(sheet.getRow(rowNumber).getCell(ExcelEnum.ARTGATTGRP.getNr()).getStringCellValue());
+        rpRezObjExt.setGattGrp(sheet.getRow(rowNumber).getCell(ExcelEnum.GATTGRP.getNr()).getRawValue().equalsIgnoreCase("#N/A") ? "UNKNOWN": sheet.getRow(rowNumber).getCell(ExcelEnum.GATTGRP.getNr()).getStringCellValue());
     }
 
     /**
@@ -457,7 +488,7 @@ sheet.getRow(rowNumber).getCell(7) != null && sheet.getRow(rowNumber).getCell(Ex
 				// _nr
                 setMrpObjCommon(mrpObj, rpRezObjExt);
                 // ME-2 "AD" = 29
-				rpRezObjExt.setRezeptanteil((float) sheet.getRow(rowNumber).getCell(ExcelEnum.ME_AE.getNr()).getNumericCellValue());
+				rpRezObjExt.setRezeptanteil((float) sheet.getRow(rowNumber).getCell(ExcelEnum.REZEPT_ANTEIL_IMCO_M2.getNr()).getNumericCellValue());
 
 		        // MI-2 "AE" = 30
 				rpRezObjExt.setMi((float) sheet.getRow(rowNumber).getCell(ExcelEnum.MI2.getNr()).getNumericCellValue());
@@ -491,14 +522,14 @@ sheet.getRow(rowNumber).getCell(7) != null && sheet.getRow(rowNumber).getCell(Ex
 		 * username = "real_sa"; String password = "sqlserver_sa";
 		 */
 
-		String connectionUrl = "jdbc:sqlserver://DE-TG-SQL01\\SQLEXPRESS:51767;" + "database=Giesserei;"
+		String connectionUrl = "jdbc:sqlserver://DE-GV-SQL01\\SQLEXPRESS;" + "database=Giesserei;"
 				+ "user=real_sa;" + "password=sqlserver_sa;" + "encrypt=true;" + "trustServerCertificate=true;"
 				+ "loginTimeout=30;";
 
 		if (instanceConn == null) {
 			try {
 				// Connection conn = DriverManager.getConnection(jdbcUrl, username, password)
-                return (DriverManager.getConnection(connectionUrl));
+                return (DriverManager.getConnection(dbConnection));
 			} catch (SQLException e) {
 				logger.error("Error in getSqlDbConnection {} {} ", e.getSQLState(), e.getMessage());
 			}
@@ -513,7 +544,6 @@ sheet.getRow(rowNumber).getCell(7) != null && sheet.getRow(rowNumber).getCell(Ex
 			saveMrpInDB();
 			saveMrpRezepteGiess();
 			saveMrpRezepteImco();
-            saveMatNrPreise();
 		} catch (Exception e) {
 			throw new DatabaseException("Save Error:: "+ e, e.getMessage());
 		}
@@ -525,7 +555,7 @@ sheet.getRow(rowNumber).getCell(7) != null && sheet.getRow(rowNumber).getCell(Ex
         // 27.03.2025 neues Feld Monat in Tabelle MRP_Mat_Preise ergänzt
         instanceConn = getSqlDbConnection();
 
-        String insertSql = "insert into MRP_Mat_Preise_TEST (Matnr, Preis, Monat) select distinct(Matnr), Preis, Monat from MRP_Rezept_TEST";
+        String insertSql = "insert into MRP_Mat_Preise (Matnr, Preis, Monat) select distinct(Matnr), Preis, Monat from MRP_Rezept";
         PreparedStatement pstmt;
         try {
             pstmt = instanceConn.prepareStatement(insertSql);
@@ -541,7 +571,7 @@ sheet.getRow(rowNumber).getCell(7) != null && sheet.getRow(rowNumber).getCell(Ex
     protected static void saveMrpInDB() throws DatabaseException {
 
 		instanceConn = getSqlDbConnection();
-		String insertSql = "insert into MRP_TEST (KosTr,KosTr_Bez,KosTr_Grp,Frmt,Datum_Zeit) "
+		String insertSql = "insert into MRP (KosTr,KosTr_Bez,KosTr_Grp,Frmt,Datum_Zeit) "
 				+ " VALUES( ?, ?, ?, ?, ?)";
 
 		PreparedStatement pstmt;
@@ -567,7 +597,7 @@ sheet.getRow(rowNumber).getCell(7) != null && sheet.getRow(rowNumber).getCell(Ex
 
     private static void saveMrpRezepte() throws DatabaseException {
         instanceConn = getSqlDbConnection();
-        String insertSql = "insert into MRP_Rezept_TEST (KosTr,OfenTyp,Zeile,MatNr,ArtikelArt,MatName,Rezeptanteil,Preis,Ausbeute,Monat, MopsMatGrp)" +
+        String insertSql = "insert into MRP_Rezept(KosTr,OfenTyp,Zeile,MatNr,ArtikelArt,MatName,Rezeptanteil,Preis,Ausbeute,Monat, MopsMatGrp)" +
                 "Values (?,?,?,?,?,?,?,?,?,?,?)";
 
         PreparedStatement pstmt;
@@ -578,7 +608,7 @@ sheet.getRow(rowNumber).getCell(7) != null && sheet.getRow(rowNumber).getCell(Ex
                 pstmt.setString(1, giessMonat1.get(i).getKosTr());
                 pstmt.setString(2, giessMonat1.get(i).getOfenTyp());
                 pstmt.setInt(3, i);
-                pstmt.setString(4, giessMonat1.get(i).getMatNr());
+                pstmt.setString(4, String.format("%08d", Integer.parseInt(giessMonat1.get(i).getMatNr())));
                 pstmt.setString(5, giessMonat1.get(i).getMatGrp());
                 // ToDO delete
                 //pstmt.setString(6, giessMonat1.get(i).getMatName());
@@ -595,7 +625,7 @@ sheet.getRow(rowNumber).getCell(7) != null && sheet.getRow(rowNumber).getCell(Ex
                 pstmt.setString(1, giessMonat2.get(i).getKosTr());
                 pstmt.setString(2, giessMonat1.get(i).getOfenTyp());
                 pstmt.setInt(3, i);
-                pstmt.setString(4, giessMonat2.get(i).getMatNr());
+                pstmt.setString(4, String.format("%08d",Integer.parseInt(giessMonat2.get(i).getMatNr())));
                 pstmt.setString(5, giessMonat2.get(i).getMatGrp());
                 // ToDO delete
                 //pstmt.setString(6, giessMonat1.get(i).getMatName());
@@ -620,7 +650,7 @@ sheet.getRow(rowNumber).getCell(7) != null && sheet.getRow(rowNumber).getCell(Ex
     }
 	private static void saveMrpRezepteGiess() throws DatabaseException {
 		instanceConn = getSqlDbConnection();
-		String insertSql = "insert into MRP_Rezept_TEST (KosTr,OfenTyp,Zeile,MatNr,ArtikelArt,MatName,Rezeptanteil,Preis,Ausbeute,Monat, MopsMatGrp)" +
+		String insertSql = "insert into MRP_Rezept (KosTr,OfenTyp,Zeile,MatNr,ArtikelArt,MatName,Rezeptanteil,Preis,Ausbeute,Monat, MopsMatGrp)" +
                          "Values (?,?,?,?,?,?,?,?,?,?,?)";
 
         String t = "";
@@ -633,7 +663,7 @@ sheet.getRow(rowNumber).getCell(7) != null && sheet.getRow(rowNumber).getCell(Ex
                  pstmt.setString(1, giessMonat1.get(i).getKosTr());
 				 pstmt.setString(2, giessMonat1.get(i).getOfenTyp());
 				 pstmt.setInt(3, i);
-				 pstmt.setString(4, giessMonat1.get(i).getMatNr());
+				 pstmt.setString(4, String.format("%08d", Integer.parseInt(giessMonat1.get(i).getMatNr())));
 				 pstmt.setString(5, giessMonat1.get(i).getMatGrp());
 				 // ToDO delete
 				 //pstmt.setString(6, giessMonat1.get(i).getMatName());
@@ -650,7 +680,7 @@ sheet.getRow(rowNumber).getCell(7) != null && sheet.getRow(rowNumber).getCell(Ex
 				 pstmt.setString(1, giessMonat2.get(i).getKosTr());
 				 pstmt.setString(2, giessMonat1.get(i).getOfenTyp());
 				 pstmt.setInt(3, i);
-				 pstmt.setString(4, giessMonat2.get(i).getMatNr());
+				 pstmt.setString(4, String.format("%08d",Integer.parseInt(giessMonat2.get(i).getMatNr())));
 				 pstmt.setString(5, giessMonat2.get(i).getMatGrp());
 				 // ToDO delete
 				 //pstmt.setString(6, giessMonat1.get(i).getMatName());
@@ -676,7 +706,7 @@ sheet.getRow(rowNumber).getCell(7) != null && sheet.getRow(rowNumber).getCell(Ex
 
 	private static void saveMrpRezepteImco() throws DatabaseException {
 		instanceConn = getSqlDbConnection();
-		String insertSql = "insert into MRP_Rezept_TEST (KosTr,OfenTyp,Zeile,MatNr,ArtikelArt,MatName,Rezeptanteil,Preis,Ausbeute,Monat,MopsMatGrp)" +
+		String insertSql = "insert into MRP_Rezept (KosTr,OfenTyp,Zeile,MatNr,ArtikelArt,MatName,Rezeptanteil,Preis,Ausbeute,Monat,MopsMatGrp)" +
                          "Values (?,?,?,?,?,?,?,?,?,?,?)";
 
 		PreparedStatement pstmt;
@@ -688,7 +718,7 @@ sheet.getRow(rowNumber).getCell(7) != null && sheet.getRow(rowNumber).getCell(Ex
                  pstmt.setString(1, imcoMonat1.get(i).getKosTr());
 				 pstmt.setString(2, imcoMonat1.get(i).getOfenTyp());
 				 pstmt.setInt(3, i);
-				 pstmt.setString(4, imcoMonat1.get(i).getMatNr());
+				 pstmt.setString(4, String.format("%08d",Integer.parseInt(imcoMonat1.get(i).getMatNr())));
 				 pstmt.setString(5, imcoMonat1.get(i).getMatGrp());
 				 // ToDO delete
 				 //pstmt.setString(6, imcoMonat1.get(i).getMatName());
@@ -706,7 +736,7 @@ sheet.getRow(rowNumber).getCell(7) != null && sheet.getRow(rowNumber).getCell(Ex
 				 pstmt.setString(2, imcoMonat2.get(i).getOfenTyp());
 				 //pstmt.setString(2, "I");
 				 pstmt.setInt(3, i);
-				 pstmt.setString(4, imcoMonat2.get(i).getMatNr());
+				 pstmt.setString(4, String.format("%08d",Integer.parseInt(imcoMonat2.get(i).getMatNr())));
 				 pstmt.setString(5, imcoMonat2.get(i).getMatGrp());
 				 // ToDO delete
 				 //pstmt.setString(6, giessMonat1.get(i).getMatName());
@@ -732,19 +762,19 @@ sheet.getRow(rowNumber).getCell(7) != null && sheet.getRow(rowNumber).getCell(Ex
 	}	
 	protected static void deleteMrpTableContent() {
 		instanceConn = getSqlDbConnection();
-		String sqlString = "DELETE FROM MRP_TEST";
+		String sqlString = "DELETE FROM MRP";
 
         deleteDatesFromTables(sqlString);
     }
 	protected static void deleteMrpRezTableContent() {
 		instanceConn = getSqlDbConnection();
-		String sqlString = "DELETE FROM MRP_Rezept_TEST";
+		String sqlString = "DELETE FROM MRP_Rezept";
 
         deleteDatesFromTables(sqlString);
     }
     protected static void deleteMatnrPreise() {
         instanceConn = getSqlDbConnection();
-        String sqlString = "DELETE FROM MRP_Mat_Preise_TEST";
+        String sqlString = "DELETE FROM MRP_Mat_Preise";
 
         deleteDatesFromTables(sqlString);
     }
